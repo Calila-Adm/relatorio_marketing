@@ -1,0 +1,9 @@
+# Ignorar arquivos de ambiente
+.env
+
+# Ignorar pastas de ambiente virtual Python
+venv/
+__pycache__/
+
+# Ignorar arquivos gerados pela automação (opcional, mas recomendado)
+*.xlsx
