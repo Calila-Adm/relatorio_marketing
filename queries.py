@@ -2,7 +2,7 @@
 
 """
 Módulo para armazenar todas as consultas SQL que serão executadas pela automação.
-As queries foram ajustadas para usar funções de intervalo de data do PostgreSQL,
+As queries foram revisadas e ajustadas para usar funções de intervalo de data do PostgreSQL,
 garantindo que funcionem corretamente em todos os meses, incluindo janeiro.
 """
 
@@ -29,17 +29,16 @@ QUERIES = {
         GROUP BY 1;
     """,
     "Compradores Únicos": """
-        WITH COMPRAS_ICLUB AS
-            (
-                SELECT DISTINCT
-                    T."PersonID" ID_CLIENTE,
-                    T."PurchasedDateTime"::DATE DATA_COMPRA
-                FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
-                LEFT JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
-                WHERE L."StatusID" NOT IN ('3', '5')
-                    AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
-                    AND T."PersonContractorID" = '12'
-            )
+        WITH COMPRAS_ICLUB AS (
+            SELECT DISTINCT
+                T."PersonID" ID_CLIENTE,
+                T."PurchasedDateTime"::DATE DATA_COMPRA
+            FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
+            JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
+            WHERE L."StatusID" NOT IN ('3', '5')
+              AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
+              AND T."PersonContractorID" = '12'
+        )
         SELECT
             TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES -- AJUSTE: Formatação de data padronizada.
             ,COUNT(DISTINCT ID_CLIENTE) AS COMPRADORES_UNICOS
@@ -66,10 +65,7 @@ QUERIES = {
               AND T."PersonContractorID" = '12'
         ),
         DIM_LOJAS AS (
-            SELECT DISTINCT
-                "StoreID" AS IDLOJA,
-                "Gshop_NomeFantasia" AS NOME_DA_LOJA
-            FROM CRMALL_LOJA_GSHOP
+            SELECT DISTINCT "StoreID" AS IDLOJA, "Gshop_NomeFantasia" AS NOME_DA_LOJA FROM CRMALL_LOJA_GSHOP
         )
         SELECT
             L.NOME_DA_LOJA,
@@ -149,16 +145,15 @@ QUERIES = {
         ORDER BY 3 DESC, 1 ASC;
     """,
     "Clientes por Categoria": """
-        -- Esta query não possui filtro de data, portanto não necessita de ajustes.
+        -- NÃO NECESSITA DE AJUSTE: Esta query não possui filtro de data.
         WITH CATEGORIA_ATUAL AS (
-            SELECT
-                *
+            SELECT *
             FROM (
                 SELECT
-                    ROW_NUMBER() OVER(PARTITION BY "PersonID" ORDER BY MAX("ActiveDateTime"::DATE) DESC, "LoyaltyCategoryID" ASC) AS ORDEM
-                    ,"PersonID" AS ID_CLIENTE
-                    ,"Category" AS CATEGORIA_ATUAL
-                    ,"InactiveDateTime"::DATE AS DATA_INATIVACAO_MED
+                    ROW_NUMBER() OVER(PARTITION BY "PersonID" ORDER BY MAX("ActiveDateTime"::DATE) DESC, "LoyaltyCategoryID" ASC) AS ORDEM,
+                    "PersonID" AS ID_CLIENTE,
+                    "Category" AS CATEGORIA_ATUAL,
+                    "InactiveDateTime"::DATE AS DATA_INATIVACAO_MED
                 FROM CRMALL_V_CRM_PERSON_LOYALTY
                 GROUP BY "PersonID", "Category", "LoyaltyCategoryID", "ActiveDateTime", "InactiveDateTime"
             ) A
@@ -232,10 +227,125 @@ QUERIES = {
         GROUP BY 1
         ORDER BY 1 ASC;
     """,
-    # ... (O restante das queries seguiria o mesmo padrão de ajuste)
-    # Para economizar espaço, vou ajustar apenas mais algumas chaves. 
-    # Aplique o mesmo padrão para as queries de TKT Médio.
-
+    "TKT Médio por Visitas - Por Categoria de Cliente": """
+        WITH COMPRAS_ICLUB AS (
+            SELECT
+                T."PersonID" ID_CLIENTE,
+                T."PurchasedDateTime"::DATE DATA_COMPRA,
+                CONCAT(T."PersonID", T."PurchasedDateTime"::DATE) VISITA,
+                SUM(T."Value"::DECIMAL(10,2)) AS ValorCompra
+            FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
+            JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
+            WHERE L."StatusID" NOT IN ('3', '5')
+              AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
+              AND T."PersonContractorID" = '12'
+            GROUP BY 1, 2, 3
+        ),
+        CATEGORIA_ATUAL AS (
+            SELECT "PersonID" AS ID_CLIENTE, "Category" AS CATEGORIA_ATUAL
+            FROM (
+                SELECT ROW_NUMBER() OVER(PARTITION BY "PersonID" ORDER BY "ActiveDateTime" DESC) AS rn, "PersonID", "Category"
+                FROM CRMALL_V_CRM_PERSON_LOYALTY
+                WHERE "InactiveDateTime" IS NULL
+            ) sub
+            WHERE rn = 1
+        )
+        SELECT
+            CA.CATEGORIA_ATUAL,
+            TO_CHAR(CI.DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE
+            COUNT(DISTINCT CI.VISITA) AS VISITAS,
+            SUM(CI.ValorCompra) AS VENDAS,
+            SUM(CI.ValorCompra) / COUNT(DISTINCT CI.VISITA) AS TKT_MEDIO_VISITA
+        FROM COMPRAS_ICLUB AS CI
+        LEFT JOIN CATEGORIA_ATUAL AS CA ON TRIM(CI.ID_CLIENTE) = TRIM(CA.ID_CLIENTE)
+        WHERE
+            -- AJUSTE: Lógica de data robusta.
+            DATE_TRUNC('month', CI.DATA_COMPRA) IN (
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
+            )
+        GROUP BY 1, 2
+        ORDER BY 3 DESC, 1 ASC;
+    """,
+    "TKT Médio por Nota Fiscal - Por Categoria de Cliente": """
+        WITH COMPRAS_ICLUB AS (
+            SELECT
+                T."PersonID" ID_CLIENTE,
+                T."PurchasedDateTime"::DATE DATA_COMPRA,
+                COUNT(DISTINCT L."TransactionID") AS QtdeNF,
+                SUM(T."Value"::DECIMAL(10,2)) AS ValorCompra
+            FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
+            JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
+            WHERE L."StatusID" NOT IN ('3', '5')
+              AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
+              AND T."PersonContractorID" = '12'
+            GROUP BY 1, 2
+        ),
+        CATEGORIA_ATUAL AS (
+            SELECT "PersonID" AS ID_CLIENTE, "Category" AS CATEGORIA_ATUAL
+            FROM (
+                SELECT ROW_NUMBER() OVER(PARTITION BY "PersonID" ORDER BY "ActiveDateTime" DESC) AS rn, "PersonID", "Category"
+                FROM CRMALL_V_CRM_PERSON_LOYALTY
+                WHERE "InactiveDateTime" IS NULL
+            ) sub
+            WHERE rn = 1
+        )
+        SELECT
+            CA.CATEGORIA_ATUAL,
+            TO_CHAR(CI.DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE
+            SUM(CI.QtdeNF) AS NF,
+            SUM(CI.ValorCompra) AS VENDAS,
+            SUM(CI.ValorCompra) / SUM(CI.QtdeNF) AS TKT_MEDIO_NF
+        FROM COMPRAS_ICLUB AS CI
+        LEFT JOIN CATEGORIA_ATUAL AS CA ON TRIM(CI.ID_CLIENTE) = TRIM(CA.ID_CLIENTE)
+        WHERE
+            -- AJUSTE: Lógica de data robusta.
+            DATE_TRUNC('month', CI.DATA_COMPRA) IN (
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
+            )
+        GROUP BY 1, 2
+        ORDER BY 3 DESC, 1 ASC;
+    """,
+    "TKT Médio Clientes - Por Categoria de Cliente": """
+        WITH COMPRAS_ICLUB AS (
+            SELECT
+                T."PersonID" ID_CLIENTE,
+                T."PurchasedDateTime"::DATE DATA_COMPRA,
+                SUM(T."Value"::DECIMAL(10,2)) AS ValorCompra
+            FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
+            JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
+            WHERE L."StatusID" NOT IN ('3', '5')
+              AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
+              AND T."PersonContractorID" = '12'
+            GROUP BY 1, 2
+        ),
+        CATEGORIA_ATUAL AS (
+            SELECT "PersonID" AS ID_CLIENTE, "Category" AS CATEGORIA_ATUAL
+            FROM (
+                SELECT ROW_NUMBER() OVER(PARTITION BY "PersonID" ORDER BY "ActiveDateTime" DESC) AS rn, "PersonID", "Category"
+                FROM CRMALL_V_CRM_PERSON_LOYALTY
+                WHERE "InactiveDateTime" IS NULL
+            ) sub
+            WHERE rn = 1
+        )
+        SELECT
+            CA.CATEGORIA_ATUAL,
+            TO_CHAR(CI.DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE
+            COUNT(DISTINCT CI.ID_CLIENTE) AS CLIENTES,
+            SUM(CI.ValorCompra) AS VENDAS,
+            SUM(CI.ValorCompra) / COUNT(DISTINCT CI.ID_CLIENTE) AS TKT_MEDIO_CLIENTES
+        FROM COMPRAS_ICLUB AS CI
+        LEFT JOIN CATEGORIA_ATUAL AS CA ON TRIM(CI.ID_CLIENTE) = TRIM(CA.ID_CLIENTE)
+        WHERE
+            -- AJUSTE: Lógica de data robusta.
+            DATE_TRUNC('month', CI.DATA_COMPRA) IN (
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
+            )
+        GROUP BY 1, 2
+        ORDER BY 3 DESC, 1 ASC;
+    """,
     "TKT Médio - Geral": """
         WITH COMPRAS_ICLUB AS (
             SELECT
@@ -250,7 +360,7 @@ QUERIES = {
             GROUP BY 1
         )
         SELECT
-            TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE: Formatação de data padronizada.
+            TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE
             SUM(QtdeNF) AS NF,
             SUM(ValorCompra) AS VENDAS,
             SUM(ValorCompra) / SUM(QtdeNF) AS TKT_MEDIO
@@ -264,9 +374,102 @@ QUERIES = {
         GROUP BY 1
         ORDER BY 3 DESC, 1 ASC;
     """,
+    "Cupons Emitidos e Consumidos - Comparação YoY": """
+        WITH DATA_CUPOM AS (
+            SELECT
+                "id",
+                -- AJUSTE: Lógica de data robusta
+                CASE
+                    WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_fim"::DATE)
+                    WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_fim"::DATE)
+                END AS DATA_ATIVO
+            FROM MOBITS_API_CUPONS
+        )
+        SELECT DISTINCT 
+            TO_CHAR(C.DATA_ATIVO, 'YYYY-MM') AS ANO_MES, -- AJUSTE
+            A.DESCRICAO,
+            COUNT(CASE WHEN UPPER(B."status") <> 'CANCELADO' THEN B."status" END) AS EMITIDOS,
+            COUNT(CASE WHEN UPPER(B."status") = 'CONSUMIDO' THEN B."status" END) AS CONSUMIDO
+        FROM MOBITS_API_CUPONS A
+        JOIN DATA_CUPOM AS C ON A."id" = C."id"
+        JOIN MOBITS_API_CUPONS_RESGATADOS B ON A."id" = B."cupom_id"
+        WHERE C.DATA_ATIVO IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY 3 DESC;
+    """,
+    "Cupons Emitidos e Consumidos por Categoria": """
+        WITH DATA_CUPOM AS (
+            SELECT
+                "id",
+                -- AJUSTE: Lógica de data robusta
+                CASE
+                    WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_fim"::DATE)
+                    WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_fim"::DATE)
+                END AS DATA_ATIVO,
+                CASE
+                    WHEN (UPPER("observacao") ILIKE '%#ESTACIONAMENTO%') THEN 'ESTACIONAMENTO'
+                    WHEN (UPPER("observacao") ILIKE '%#LOJA%') THEN 'LOJA'
+                    WHEN (UPPER("observacao") ILIKE '%#SHOPPING%') THEN 'SHOPPING'
+                    WHEN (UPPER("observacao") ILIKE '%#IGUATEMI HALL%') THEN 'IGUATEMI HALL'
+                    WHEN (UPPER("observacao") ILIKE '%#CINEMA%') THEN 'CINEMA'
+                    WHEN (UPPER("observacao") ILIKE '%#EXTERNO%') THEN 'EXTERNO'
+                    WHEN (UPPER("observacao") ILIKE '%#EVENTO I_CLUB%') THEN 'ICLUB'
+                    ELSE 'SEM CLASSIFICACAO'
+                END AS CATEGORIA_CUPOM
+            FROM MOBITS_API_CUPONS
+        )
+        SELECT DISTINCT 
+            TO_CHAR(C.DATA_ATIVO, 'YYYY-MM') AS ANO_MES, -- AJUSTE
+            C.CATEGORIA_CUPOM,
+            COUNT(CASE WHEN UPPER(R."status") <> 'CANCELADO' THEN R."status" END) AS EMITIDOS,
+            COUNT(CASE WHEN UPPER(R."status") = 'CONSUMIDO' THEN R."status" END) AS CONSUMIDO
+        FROM MOBITS_API_CUPONS A
+        JOIN DATA_CUPOM AS C ON A."id" = C."id"
+        JOIN MOBITS_API_CUPONS_RESGATADOS R ON A."id" = R."cupom_id"
+        WHERE C.DATA_ATIVO IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY 3 DESC;
+    """,
+    "Cupons por Categoria": """
+        WITH DATA_CUPOM AS (
+            SELECT
+                "id",
+                -- AJUSTE: Lógica de data robusta
+                CASE
+                    WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_fim"::DATE)
+                    WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_fim"::DATE)
+                END AS DATA_ATIVO,
+                CASE
+                    WHEN (UPPER("observacao") ILIKE '%#ESTACIONAMENTO%') THEN 'ESTACIONAMENTO'
+                    WHEN (UPPER("observacao") ILIKE '%#LOJA%') THEN 'LOJA'
+                    WHEN (UPPER("observacao") ILIKE '%#SHOPPING%') THEN 'SHOPPING'
+                    WHEN (UPPER("observacao") ILIKE '%#IGUATEMI HALL%') THEN 'IGUATEMI HALL'
+                    WHEN (UPPER("observacao") ILIKE '%#CINEMA%') THEN 'CINEMA'
+                    WHEN (UPPER("observacao") ILIKE '%#EXTERNO%') THEN 'EXTERNO'
+                    WHEN (UPPER("observacao") ILIKE '%#EVENTO I_CLUB%') THEN 'ICLUB'
+                    ELSE 'SEM CLASSIFICACAO'
+                END AS CATEGORIA_CUPOM
+            FROM MOBITS_API_CUPONS
+        )
+        SELECT DISTINCT 
+            TO_CHAR(C.DATA_ATIVO, 'YYYY-MM') AS ANO_MES, -- AJUSTE
+            C.CATEGORIA_CUPOM,
+            COUNT(DISTINCT A."id") AS CUPONS_ATIVOS
+        FROM MOBITS_API_CUPONS A
+        JOIN DATA_CUPOM AS C ON A."id" = C."id"
+        WHERE C.DATA_ATIVO IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY 3 DESC;
+    """,    
     "Notas Fiscais Cadastradas - Comparação YoY": """
         SELECT
-            TO_CHAR(L."CreatedDateTime"::DATE, 'YYYY-MM') AS ANO_MES, -- AJUSTE: Formatação de data padronizada.
+            TO_CHAR(L."CreatedDateTime"::DATE, 'YYYY-MM') AS ANO_MES, -- AJUSTE
             COUNT(DISTINCT L."TransactionID") AS NOTAS_CADASTRADAS
         FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
         WHERE L."StatusID" NOT IN ('3', '5')
@@ -290,7 +493,7 @@ QUERIES = {
             GROUP BY 1
         )
         SELECT
-            TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE: Formatação de data padronizada.
+            TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE
             SUM(VALORCOMPRA) AS VENDAS
         FROM COMPRAS_ICLUB
         WHERE
@@ -303,52 +506,41 @@ QUERIES = {
         ORDER BY 1 ASC;
     """,
     "Representatividade - Comparação YoY": """
-       WITH COMPRAS_ICLUB AS (
+       WITH COMPRAS_ICLUB_POR_MES AS (
             SELECT
-                T."PurchasedDateTime"::DATE AS DATA_COMPRA,
-                SUM(T."Value"::DECIMAL(10,2)) AS ValorCompra
+                TO_CHAR(T."PurchasedDateTime"::DATE, 'YYYY-MM') AS ANO_MES, -- AJUSTE
+                SUM(T."Value"::DECIMAL(10,2)) AS COMPRAS_ICLUB
             FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
             JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
             WHERE L."StatusID" NOT IN ('3', '5')
                 AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
                 AND T."PersonContractorID" = '12'
+                -- AJUSTE: Filtro de data aplicado aqui
+                AND DATE_TRUNC('month', T."PurchasedDateTime"::DATE) IN (
+                    DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
+                    DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
+                )
             GROUP BY 1
         ),
-        VENDAS_POR_MES AS (
-            SELECT
-                TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE
-                SUM(ValorCompra) AS COMPRAS_ICLUB
-            FROM COMPRAS_ICLUB
-            GROUP BY 1
-        ),
-        VENDAS_GSHOP AS (
+        VENDAS_GSHOP_POR_MES AS (
             SELECT
                 TO_CHAR("Data"::DATE, 'YYYY-MM') AS ANO_MES, -- AJUSTE
                 SUM("VENDAS_BRUTAS"::DECIMAL(10,2)) VENDAS_IGT
             FROM GSHOP_VENDAS_GQUEST
             WHERE "Filial" = '1'
+                -- AJUSTE: Filtro de data aplicado aqui
+                AND DATE_TRUNC('month', "Data"::DATE) IN (
+                    DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
+                    DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
+                )
             GROUP BY 1
         )
         SELECT
             COALESCE(VPM.ANO_MES, VG.ANO_MES) AS ANO_MES,
             VG.VENDAS_IGT AS RECEITA_IGUATEMI,
             VPM.COMPRAS_ICLUB AS NOTAS_FISCAIS_CADASTRADAS
-        FROM VENDAS_POR_MES VPM
-        FULL OUTER JOIN VENDAS_GSHOP VG ON VPM.ANO_MES = VG.ANO_MES
-        WHERE
-            -- AJUSTE: Lógica de data robusta aplicada no final.
-            COALESCE(VPM.ANO_MES, VG.ANO_MES) IN (
-                TO_CHAR(CURRENT_DATE - INTERVAL '1 month', 'YYYY-MM'),
-                TO_CHAR(CURRENT_DATE - INTERVAL '13 months', 'YYYY-MM')
-            )
+        FROM COMPRAS_ICLUB_POR_MES VPM
+        FULL OUTER JOIN VENDAS_GSHOP_POR_MES VG ON VPM.ANO_MES = VG.ANO_MES
         ORDER BY 1;
     """
-    # ... As demais queries, como as de TKT Médio por Categoria, devem ser ajustadas da mesma forma.
-    # O padrão é:
-    # 1. Trocar CONCAT(EXTRACT(YEAR...),'-','0',EXTRACT(MONTH...)) por TO_CHAR(data_col, 'YYYY-MM')
-    # 2. Trocar a cláusula WHERE de data por:
-    #    DATE_TRUNC('month', data_col) IN (
-    #        DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
-    #        DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
-    #    )
 }
