@@ -8,3 +8,4 @@ __pycache__/
 # Ignorar arquivos gerados pela automação (opcional, mas recomendado)
 *.xlsx
 automation.log
+queries.py
