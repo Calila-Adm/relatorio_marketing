@@ -13,20 +13,21 @@ Funcionalidades principais:
 
 Autor: Marketing Team - Iguatemi
 Data: 2025
-Versão: 1.0
+Versão: 2.0
 """
 
 import os
 import pandas as pd
-import smtplib
 import logging
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from queries import QUERIES
+
+# Importar novos módulos de email
+from email_service import EmailService
+from email_formatter import EmailFormatter
 
 # Configuração básica de logging
 # O sistema mantém logs tanto em arquivo quanto no console para facilitar monitoramento
@@ -39,57 +40,28 @@ logging.basicConfig(
     ]
 )
 
-def send_notification_email(subject, body):
+def send_notification_email(subject, body, attachments=None):
     """
     Envia um e-mail de notificação sobre o status da execução da automação.
     
-    Esta função é responsável por enviar e-mails HTML formatados para a equipe de Marketing
-    e CEO, informando sobre o sucesso ou falha da geração dos relatórios mensais.
+    Esta função usa o novo EmailService com suporte a múltiplos provedores
+    e mecanismos de fallback para garantir entrega do email.
     
     Args:
-        subject (str): Assunto do e-mail, geralmente incluindo o mês/ano do relatório
-        body (str): Corpo do e-mail em formato HTML com detalhes da execução
-        
-    Variáveis de Ambiente Necessárias:
-        EMAIL_SENDER: E-mail remetente (ex: automacao@iguatemi.com.br)
-        EMAIL_RECIPIENT: E-mail destinatário (ex: marketing@iguatemi.com.br)
-        EMAIL_PASSWORD: Senha do e-mail remetente
-        SMTP_SERVER: Servidor SMTP (ex: smtp.office365.com)
-        SMTP_PORT: Porta do servidor SMTP (ex: 587)
-        
-    Tratamento de Erros:
-        - Falhas de autenticação SMTP (erro 535 identificado nos logs)
-        - Problemas de conexão com servidor SMTP
-        - Configurações incorretas de porta/servidor
+        subject (str): Assunto do e-mail
+        body (str): Corpo do e-mail em formato HTML
+        attachments (list): Lista de arquivos para anexar (opcional)
         
     Returns:
-        None
+        bool: True se enviado com sucesso, False caso contrário
     """
-    try:
-        # Carrega configurações de e-mail das variáveis de ambiente
-        sender_email = os.getenv("EMAIL_SENDER")
-        receiver_email = os.getenv("EMAIL_RECIPIENT")
-        password = os.getenv("EMAIL_PASSWORD")
-        smtp_server = os.getenv("SMTP_SERVER")
-        smtp_port = int(os.getenv("SMTP_PORT"))
-
-        # Cria mensagem MIME multiparte para suportar HTML
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'html'))
-
-        # Estabelece conexão segura com servidor SMTP
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()  # Ativa criptografia TLS
-            server.login(sender_email, password)  # Autenticação SMTP
-            server.send_message(msg)
-        logging.info("E-mail de notificação enviado com sucesso.")
-    except Exception as e:
-        # Log detalhado do erro para facilitar troubleshooting
-        # Erro 535 comum indica falha de autenticação (senha incorreta ou 2FA ativado)
-        logging.error(f"Falha ao enviar e-mail de notificação: {e}")
+    email_service = EmailService()
+    success = email_service.send_notification(subject, body, attachments or [])
+    
+    if not success:
+        logging.error("Falha ao enviar email após tentar todos os provedores")
+    
+    return success
 
 def run_report_job():
     """
@@ -167,6 +139,8 @@ def run_report_job():
     status_report = []
     # Set para controlar nomes únicos de abas no Excel (limite 31 caracteres)
     processed_sheets = set()
+    # Dicionário para armazenar DataFrames para geração do email formatado
+    dataframes_dict = {}
 
     try:
         # Cria arquivo Excel usando pandas com engine openpyxl
@@ -191,6 +165,8 @@ def run_report_job():
                     logging.info(f"Executando query: '{name}'...")
                     # Executa query SQL e converte resultado para DataFrame
                     df = pd.read_sql_query(text(query), engine)
+                    # Armazena DataFrame para uso posterior
+                    dataframes_dict[name] = df
                     # Salva DataFrame como aba no Excel
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
                     # Registra sucesso para relatório de status
@@ -204,18 +180,73 @@ def run_report_job():
         logging.info(f"Arquivo Excel '{file_name}' criado com sucesso em '{export_path}'.")
 
         # --- FASE 3: Envio de E-mail com Resumo da Execução ---
-        # Monta e-mail HTML com status detalhado de cada relatório
-        email_subject = f"Relatórios Extraídos com Sucesso - {report_month_str}"
-        email_body = f"""
-        <h1>Relatório de Execução da Automação</h1>
-        <p>O processo de extração de dados do mês <b>{report_month_str}</b> foi concluído.</p>
-        <p>O arquivo <b>{file_name}</b> foi salvo em: {export_path}</p>
-        <h2>Status de Cada Relatório:</h2>
-        <ul>
-        {''.join(status_report)}
-        </ul>
-        """
-        send_notification_email(email_subject, email_body)
+        # Verificar se todas as queries críticas foram executadas com sucesso
+        critical_queries = [
+            "Notas Fiscais Cadastradas - Comparação YoY",
+            "Vendas Cadastradas - Comparação YoY",
+            "Compradores Únicos",
+            "Clientes por Categoria"
+        ]
+        
+        all_critical_success = all(name in dataframes_dict for name in critical_queries)
+        
+        if all_critical_success:
+            # Gerar email no formato especificado
+            try:
+                email_formatter = EmailFormatter(dataframes_dict, report_month_str)
+                formatted_email_body = email_formatter.generate_email_body()
+                
+                # Assunto do email
+                month_name = email_formatter.format_month_name(report_month_str)
+                email_subject = f"Relatório Mensal I-Club - {month_name}"
+                
+                # Enviar email formatado com o arquivo Excel anexado
+                success = send_notification_email(
+                    email_subject, 
+                    f"<pre style='font-family: Arial, sans-serif;'>{formatted_email_body}</pre>",
+                    [full_file_path]
+                )
+                
+                if not success:
+                    # Se falhar, enviar email simples de status
+                    fallback_subject = f"Relatórios Gerados (Email não formatado) - {report_month_str}"
+                    fallback_body = f"""
+                    <h3>Relatório gerado mas houve problema no envio do email formatado</h3>
+                    <p>O arquivo Excel foi gerado com sucesso: <b>{file_name}</b></p>
+                    <p>Localização: {export_path}</p>
+                    <p>Por favor, verifique o arquivo manualmente.</p>
+                    <h4>Status das Queries:</h4>
+                    <ul>{''.join(status_report)}</ul>
+                    """
+                    send_notification_email(fallback_subject, fallback_body, [full_file_path])
+            
+            except Exception as e:
+                logging.error(f"Erro ao formatar email: {e}")
+                # Enviar email de status básico
+                basic_subject = f"Relatórios Extraídos - {report_month_str}"
+                basic_body = f"""
+                <h3>Processo de extração concluído</h3>
+                <p>Arquivo gerado: <b>{file_name}</b></p>
+                <p>Localização: {export_path}</p>
+                <h4>Status:</h4>
+                <ul>{''.join(status_report)}</ul>
+                """
+                send_notification_email(basic_subject, basic_body, [full_file_path])
+        else:
+            # Enviar email de aviso sobre queries faltantes
+            warning_subject = f"Relatórios Parciais - {report_month_str}"
+            warning_body = f"""
+            <h3>⚠️ Atenção: Algumas queries críticas falharam</h3>
+            <p>O arquivo Excel foi gerado mas está incompleto: <b>{file_name}</b></p>
+            <p>Localização: {export_path}</p>
+            <h4>Status das Queries:</h4>
+            <ul>{''.join(status_report)}</ul>
+            <p><b>Queries críticas faltantes:</b></p>
+            <ul>
+            {''.join([f"<li>{q}</li>" for q in critical_queries if q not in dataframes_dict])}
+            </ul>
+            """
+            send_notification_email(warning_subject, warning_body, [full_file_path])
 
     except Exception as e:
         # Tratamento de erro geral - captura falhas não previstas

@@ -9,3 +9,5 @@ __pycache__/
 *.xlsx
 automation.log
 queries.py
+Melhorias.md
+performance_analysis.md
