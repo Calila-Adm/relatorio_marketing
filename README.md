@@ -18,7 +18,7 @@ Os arquivos Excel são salvos automaticamente em pastas organizadas por mês:
 
 **📁 Pasta base (Windows):**
 ```
-C:\Users\edgar.prado\Documents\relatorio_fechamento_mensal\
+C:\Users\~\Documents\relatorio_fechamento_mensal\
 ```
 
 **🗂️ Estrutura de pastas criadas automaticamente:**
@@ -33,7 +33,7 @@ relatorio_fechamento_mensal/
 
 **⚠️ IMPORTANTE:** Para alterar o caminho, modifique no arquivo `main.py` linha 88:
 ```python
-base_path = "/mnt/c/Users/edgar.prado/Documents/relatorio_fechamento_mensal"
+base_path = "/mnt/c/Users/~/relatorio_fechamento_mensal"
 ```
 
 **📝 Nota:** O caminho `/mnt/c/` corresponde ao drive C: do Windows no WSL.
