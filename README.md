@@ -67,7 +67,7 @@ pip install -r requirements.txt
 
 ### 🪟 **Windows:**
 ```cmd
-# Instalar dependencias
+# Instalar dependências
 pip install -r requirements.txt
 ```
 
@@ -87,11 +87,11 @@ deactivate
 
 ### 🪟 **Windows (CMD/PowerShell):**
 ```cmd
-Executar sistema
+# Executar sistema
 python main.py
 ```
 
-O sistema ira�:
+O sistema irá:
 1. Conectar no banco PostgreSQL com connection pooling otimizado
 2. Criar/verificar índices de performance automaticamente
 3. Criar pasta do mês anterior (ex: `julho'25/`)
@@ -100,7 +100,7 @@ O sistema ira�:
 6. Salvar todos os arquivos na pasta criada para o mês
 7. Mostrar relatório completo no console/logs
 
-## 📝 Logs
+## 📋 Logs
 
 Todos os logs são salvos em:
 - **Console**: Output em tempo real
