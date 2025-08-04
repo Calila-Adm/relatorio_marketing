@@ -1,86 +1,153 @@
-# queries.py
-
 """
-Módulo para armazenar todas as consultas SQL que serão executadas pela automação.
-As queries foram revisadas e ajustadas para usar funções de intervalo de data do PostgreSQL,
-garantindo que funcionem corretamente em todos os meses, incluindo janeiro.
+queries.py - Módulo de Consultas SQL para Relatórios I-Club
+
+Este módulo centraliza todas as queries SQL utilizadas na geração dos relatórios
+mensais do programa de fidelidade I-Club do Iguatemi.
+
+Estrutura das Queries:
+- Todas utilizam CTEs (Common Table Expressions) para modularidade
+- Lógica robusta de datas para comparações Year-over-Year (YoY)
+- Formatação padronizada de datas como 'YYYY-MM'
+- Tratamento especial para casos de borda (ex: janeiro)
+
+Métricas Cobertas:
+1. Cupons: Ativos, emitidos, consumidos por categoria
+2. Clientes: Compradores únicos, segmentação por categoria
+3. Lojas: Rankings por vendas, NFs e compradores
+4. Visitas: Análise por categoria e comparações YoY
+5. Ticket Médio: Por cliente, NF e visita
+6. Performance: NFs cadastradas, vendas, representatividade
+
+Otimizações Aplicadas:
+- Uso de DATE_TRUNC para performance em comparações de datas
+- INTERVAL do PostgreSQL para cálculos robustos de períodos
+- JOINs otimizados com TRIM para limpeza de espaços
+- Filtros WHERE aplicados antes de agregações
+
+Autor: Marketing Team - Iguatemi
+Data: 2025
+Versão: 1.0
 """
 
 QUERIES = {
+    # ========================================================================
+    # QUERY 1: CUPONS ATIVOS
+    # ========================================================================
+    # Objetivo: Contar quantidade de cupons ativos no mês atual e mesmo mês ano anterior
+    # Tabelas: MOBITS_API_CUPONS (sistema de cupons do programa de fidelidade)
+    # Lógica: Identifica cupons ativos baseado em data_inicio/data_fim
+    # Resultado: Total de cupons disponíveis por mês para comparação YoY
+    # ========================================================================
     "Cupons Ativos": """
+        -- CTE para determinar o período de atividade de cada cupom
         WITH DATA_CUPOM AS (
             SELECT
                 "id",
-                -- AJUSTE: Lógica de data robusta para evitar erros em janeiro.
+                -- Lógica complexa para determinar mês de atividade do cupom
+                -- Verifica se cupom estava ativo no mês anterior (relatório atual)
+                -- ou no mesmo mês do ano anterior (comparação YoY)
                 CASE
+                    -- Cupom iniciou no mês anterior
                     WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    -- Cupom terminou no mês anterior
                     WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') THEN DATE_TRUNC('month', "data_fim"::DATE)
+                    -- Cupom iniciou no mesmo mês do ano anterior
                     WHEN DATE_TRUNC('month', "data_inicio"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_inicio"::DATE)
+                    -- Cupom terminou no mesmo mês do ano anterior
                     WHEN DATE_TRUNC('month', "data_fim"::DATE) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months') THEN DATE_TRUNC('month', "data_fim"::DATE)
                 END AS DATA_ATIVO
             FROM MOBITS_API_CUPONS
         )
+        -- Query principal: Agrupa e conta cupons por mês
         SELECT DISTINCT 
-            TO_CHAR(C.DATA_ATIVO, 'YYYY-MM') AS ANO_MES -- AJUSTE: Formatação padrão de data
-            ,COUNT(DISTINCT A."id") AS CUPONS_ATIVOS
+            TO_CHAR(C.DATA_ATIVO, 'YYYY-MM') AS ANO_MES  -- Formato padrão para todas as queries
+            ,COUNT(DISTINCT A."id") AS CUPONS_ATIVOS     -- Total de cupons únicos ativos
         FROM MOBITS_API_CUPONS A
         JOIN DATA_CUPOM AS C ON A."id" = C."id"
-        WHERE C.DATA_ATIVO IS NOT NULL
+        WHERE C.DATA_ATIVO IS NOT NULL  -- Exclui cupons sem período definido
         GROUP BY 1;
     """,
+    # ========================================================================
+    # QUERY 2: COMPRADORES ÚNICOS
+    # ========================================================================
+    # Objetivo: Contar clientes únicos que realizaram compras no I-Club
+    # Tabelas: CRMALL_V_CRM_TRANSACTIONLOYALTY (transações do programa)
+    #          CRMALL_V_CRM_TRANSACTION (detalhes das transações)
+    # Filtros: StatusID NOT IN ('3','5') = exclui transações canceladas/inválidas
+    #          PersonContractorID = '12' = identifica Iguatemi
+    # Resultado: Total de compradores únicos por mês (YoY)
+    # ========================================================================
     "Compradores Únicos": """
+        -- CTE para identificar todas as compras válidas do I-Club
         WITH COMPRAS_ICLUB AS (
             SELECT DISTINCT
-                T."PersonID" ID_CLIENTE,
-                T."PurchasedDateTime"::DATE DATA_COMPRA
-            FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
+                T."PersonID" ID_CLIENTE,                    -- ID único do cliente
+                T."PurchasedDateTime"::DATE DATA_COMPRA    -- Data da compra (sem hora)
+            FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L       -- Tabela de loyalty
             JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
-            WHERE L."StatusID" NOT IN ('3', '5')
-              AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
-              AND T."PersonContractorID" = '12'
+            WHERE L."StatusID" NOT IN ('3', '5')            -- Exclui status cancelado/inválido
+              AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''  -- Garante data válida
+              AND T."PersonContractorID" = '12'             -- Filtro específico Iguatemi
         )
+        -- Query principal: Conta compradores únicos por mês
         SELECT
-            TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES -- AJUSTE: Formatação de data padronizada.
-            ,COUNT(DISTINCT ID_CLIENTE) AS COMPRADORES_UNICOS
+            TO_CHAR(DATA_COMPRA, 'YYYY-MM') AS ANO_MES     -- Formato padrão YYYY-MM
+            ,COUNT(DISTINCT ID_CLIENTE) AS COMPRADORES_UNICOS -- Conta clientes únicos
         FROM COMPRAS_ICLUB
         WHERE 
-            -- AJUSTE: Lógica de data robusta usando IN para comparar com o mês anterior e o mesmo mês do ano anterior.
+            -- Filtro robusto para pegar mês anterior E mesmo mês ano anterior
             DATE_TRUNC('month', DATA_COMPRA) IN (
-                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
-                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'),   -- Mês anterior
+                DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')  -- Mesmo mês ano anterior
             )
         GROUP BY 1
-        ORDER BY 1 ASC;
+        ORDER BY 1 ASC;  -- Ordena cronologicamente
     """,
+    # ========================================================================
+    # QUERY 3: TOP 10 LOJAS + COMPRADORES ÚNICOS
+    # ========================================================================
+    # Objetivo: Ranking das lojas com mais compradores únicos no I-Club
+    # Tabelas: CRMALL_V_CRM_TRANSACTIONLOYALTY, CRMALL_V_CRM_TRANSACTION
+    #          CRMALL_LOJA_GSHOP (dimensão de lojas)
+    # Lógica: Conta clientes distintos por loja para identificar as mais populares
+    # Uso: Identificar lojas com maior engajamento no programa de fidelidade
+    # Resultado: Lista ordenada por quantidade de compradores únicos
+    # ========================================================================
     "Top 10 Lojas + Compradores Únicos": """
+        -- CTE 1: Identifica todas as compras por loja e cliente
         WITH COMPRAS_ICLUB AS (
             SELECT DISTINCT
-                T."StoreID" AS IDLOJA,
-                T."PersonID" ID_CLIENTE,
-                T."PurchasedDateTime"::DATE DATA_COMPRA
+                T."StoreID" AS IDLOJA,                      -- ID da loja
+                T."PersonID" ID_CLIENTE,                    -- ID do cliente
+                T."PurchasedDateTime"::DATE DATA_COMPRA    -- Data da compra
             FROM CRMALL_V_CRM_TRANSACTIONLOYALTY AS L
             JOIN CRMALL_V_CRM_TRANSACTION AS T ON L."TransactionID" = T."TransactionID" 
-            WHERE L."StatusID" NOT IN ('3', '5')
+            WHERE L."StatusID" NOT IN ('3', '5')            -- Exclui canceladas
               AND T."PurchasedDateTime" IS NOT NULL AND T."PurchasedDateTime" <> ''
-              AND T."PersonContractorID" = '12'
+              AND T."PersonContractorID" = '12'             -- Filtro Iguatemi
         ),
+        -- CTE 2: Dimensão de lojas para obter nomes fantasia
         DIM_LOJAS AS (
-            SELECT DISTINCT "StoreID" AS IDLOJA, "Gshop_NomeFantasia" AS NOME_DA_LOJA FROM CRMALL_LOJA_GSHOP
+            SELECT DISTINCT 
+                "StoreID" AS IDLOJA, 
+                "Gshop_NomeFantasia" AS NOME_DA_LOJA 
+            FROM CRMALL_LOJA_GSHOP
         )
+        -- Query principal: Conta compradores únicos por loja
         SELECT
-            L.NOME_DA_LOJA,
-            TO_CHAR(C.DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- AJUSTE: Formatação de data padronizada.
-            COUNT(DISTINCT C.ID_CLIENTE) AS COMPRADORES_UNICOS
+            L.NOME_DA_LOJA,                                -- Nome comercial da loja
+            TO_CHAR(C.DATA_COMPRA, 'YYYY-MM') AS ANO_MES, -- Período
+            COUNT(DISTINCT C.ID_CLIENTE) AS COMPRADORES_UNICOS  -- Total único
         FROM COMPRAS_ICLUB AS C
-        JOIN DIM_LOJAS AS L ON TRIM(C.IDLOJA) = TRIM(L.IDLOJA)
+        JOIN DIM_LOJAS AS L ON TRIM(C.IDLOJA) = TRIM(L.IDLOJA)  -- TRIM remove espaços
         WHERE 
-            -- AJUSTE: Lógica de data robusta.
+            -- Filtro para mês atual e comparação YoY
             DATE_TRUNC('month', C.DATA_COMPRA) IN (
                 DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'), 
                 DATE_TRUNC('month', CURRENT_DATE - INTERVAL '13 months')
             )
         GROUP BY 1, 2
-        ORDER BY 3 DESC, 1 ASC;
+        ORDER BY 3 DESC, 1 ASC;  -- Ordena por quantidade (maior primeiro)
     """,
     "Top 10 Lojas + Vendas": """
         WITH COMPRAS_ICLUB AS (
@@ -144,24 +211,40 @@ QUERIES = {
         GROUP BY 1, 2
         ORDER BY 3 DESC, 1 ASC;
     """,
+    # ========================================================================
+    # QUERY 6: CLIENTES POR CATEGORIA
+    # ========================================================================
+    # Objetivo: Segmentação atual dos clientes do I-Club por categoria
+    # Tabelas: CRMALL_V_CRM_PERSON_LOYALTY (histórico de categorias)
+    # Categorias: Diamante, Ouro, Prata, Prospect, Inativo
+    # Lógica: Usa ROW_NUMBER para pegar categoria mais recente de cada cliente
+    # Nota: Não tem filtro de data - mostra situação atual da base
+    # Uso: Entender distribuição atual da base de clientes
+    # ========================================================================
     "Clientes por Categoria": """
-        -- NÃO NECESSITA DE AJUSTE: Esta query não possui filtro de data.
+        -- CTE para identificar categoria atual de cada cliente
         WITH CATEGORIA_ATUAL AS (
             SELECT *
             FROM (
                 SELECT
-                    ROW_NUMBER() OVER(PARTITION BY "PersonID" ORDER BY MAX("ActiveDateTime"::DATE) DESC, "LoyaltyCategoryID" ASC) AS ORDEM,
+                    -- ROW_NUMBER garante apenas 1 categoria por cliente (a mais recente)
+                    ROW_NUMBER() OVER(
+                        PARTITION BY "PersonID" 
+                        ORDER BY MAX("ActiveDateTime"::DATE) DESC,  -- Mais recente primeiro
+                                "LoyaltyCategoryID" ASC             -- Desempate por ID
+                    ) AS ORDEM,
                     "PersonID" AS ID_CLIENTE,
-                    "Category" AS CATEGORIA_ATUAL,
+                    "Category" AS CATEGORIA_ATUAL,              -- Nome da categoria
                     "InactiveDateTime"::DATE AS DATA_INATIVACAO_MED
                 FROM CRMALL_V_CRM_PERSON_LOYALTY
                 GROUP BY "PersonID", "Category", "LoyaltyCategoryID", "ActiveDateTime", "InactiveDateTime"
             ) A
-            WHERE DATA_INATIVACAO_MED IS NULL
+            WHERE DATA_INATIVACAO_MED IS NULL  -- Apenas categorias ativas
         )
+        -- Query principal: Conta clientes por categoria
         SELECT
-            CATEGORIA_ATUAL,
-            COUNT(DISTINCT ID_CLIENTE) AS CLIENTES
+            CATEGORIA_ATUAL,                    -- Diamante, Ouro, Prata, etc
+            COUNT(DISTINCT ID_CLIENTE) AS CLIENTES  -- Total em cada categoria
         FROM CATEGORIA_ATUAL
         GROUP BY 1;
     """,
